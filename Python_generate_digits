@@ -1,0 +1,160 @@
+# -*- coding: utf-8 -*-
+"""
+Генерация рукописных цифр с помощью LSTM (вариант 9)
+Запуск в VSCode с GPU NVIDIA GeForce RTX
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.datasets import mnist
+import tensorflow as tf
+import os
+
+# ------------------------------------------------------------
+# ПАРАМЕТРЫ ДЛЯ ОБУЧЕНИЯ (оптимальные для RTX)
+# ------------------------------------------------------------
+N_SAMPLES = 3000          # количество изображений для обучения (всего 60000)
+WINDOW = 80               # окно: сколько предыдущих пикселей используем для предсказания
+EPOCHS = 5                # количество эпох (достаточно для демонстрации)
+BATCH_SIZE = 128          # размер батча (можно увеличить для ускорения)
+VAL_SPLIT = 0.1           # доля валидации
+MODEL_SAVE_PATH = 'digit_generator.h5'   # путь для сохранения модели
+
+# ------------------------------------------------------------
+# 1. ПРОВЕРКА GPU
+# ------------------------------------------------------------
+print("Доступные устройства TensorFlow:")
+print(tf.config.list_physical_devices())
+print("GPU доступен:", tf.test.is_gpu_available())
+print("Версия TensorFlow:", tf.__version__)
+
+# ------------------------------------------------------------
+# 2. ЗАГРУЗКА ДАННЫХ
+# ------------------------------------------------------------
+(x_train_full, y_train_full), (x_test, y_test) = mnist.load_data()
+
+# Берём только первые N_SAMPLES изображений для обучения
+x_train = x_train_full[:N_SAMPLES].astype('float32') / 255.0
+# Для валидации возьмём следующие 500 изображений
+x_val = x_train_full[N_SAMPLES:N_SAMPLES+500].astype('float32') / 255.0
+
+# Преобразуем в последовательности: (количество, 28*28, 1)
+seq_len = 28 * 28  # 784
+x_train_seq = x_train.reshape(-1, seq_len, 1)
+x_val_seq = x_val.reshape(-1, seq_len, 1)
+
+print(f"Размер обучающей выборки: {x_train_seq.shape[0]} изображений")
+print(f"Размер валидационной выборки: {x_val_seq.shape[0]} изображений")
+
+# ------------------------------------------------------------
+# 3. ФОРМИРОВАНИЕ ОБУЧАЮЩИХ ПРИМЕРОВ (скользящее окно)
+# ------------------------------------------------------------
+def make_dataset(images, window):
+    """
+    Преобразует массив изображений (количество, 784, 1) в наборы (X, Y)
+    X: окно из window предыдущих пикселей
+    Y: следующий пиксель
+    """
+    X, Y = [], []
+    for img in images:
+        for i in range(window, seq_len):
+            X.append(img[i-window:i])   # окно пикселей
+            Y.append(img[i])            # следующий пиксель
+    X = np.array(X).reshape(-1, window, 1)
+    Y = np.array(Y).reshape(-1, 1)
+    return X, Y
+
+print("Формирование обучающих примеров (может занять некоторое время)...")
+X_train, Y_train = make_dataset(x_train_seq, WINDOW)
+X_val, Y_val = make_dataset(x_val_seq, WINDOW)
+
+print("Размер X_train:", X_train.shape, "Y_train:", Y_train.shape)
+print("Размер X_val:", X_val.shape, "Y_val:", Y_val.shape)
+
+# ------------------------------------------------------------
+# 4. ПОСТРОЕНИЕ МОДЕЛИ
+# ------------------------------------------------------------
+model = Sequential([
+    LSTM(128, activation='tanh', input_shape=(WINDOW, 1)),
+    Dense(1, activation='sigmoid')
+])
+
+model.compile(optimizer=Adam(learning_rate=0.001),
+              loss='binary_crossentropy',
+              metrics=['accuracy'])
+
+model.summary()
+
+# ------------------------------------------------------------
+# 5. ОБУЧЕНИЕ
+# ------------------------------------------------------------
+history = model.fit(X_train, Y_train,
+                    batch_size=BATCH_SIZE,
+                    epochs=EPOCHS,
+                    validation_data=(X_val, Y_val))
+
+# Сохраняем обученную модель
+model.save(MODEL_SAVE_PATH)
+print(f"Модель сохранена в {MODEL_SAVE_PATH}")
+
+# ------------------------------------------------------------
+# 6. ФУНКЦИЯ ГЕНЕРАЦИИ НОВОЙ ЦИФРЫ
+# ------------------------------------------------------------
+def generate_digit(seed=None, window=WINDOW, length=784):
+    """
+    Генерирует цифру, начиная с seed (список из window пикселей).
+    Если seed не задан, берётся случайное окно из обучающей выборки.
+    """
+    if seed is None:
+        # Случайное окно из X_train
+        idx = np.random.randint(0, len(X_train))
+        generated = X_train[idx].flatten().tolist()
+    else:
+        generated = seed[:]
+
+    # Генерируем остальные пиксели
+    for _ in range(length - window):
+        input_seq = np.array(generated[-window:]).reshape(1, window, 1)
+        pred = model.predict(input_seq, verbose=0)[0, 0]
+        generated.append(pred)
+
+    # Преобразуем в изображение 28x28
+    generated = np.array(generated[:length]).reshape(28, 28)
+    return generated
+
+# ------------------------------------------------------------
+# 7. ВИЗУАЛИЗАЦИЯ СГЕНЕРИРОВАННЫХ ЦИФР
+# ------------------------------------------------------------
+plt.figure(figsize=(12, 4))
+for i in range(5):
+    digit = generate_digit()
+    plt.subplot(1, 5, i+1)
+    plt.imshow(digit, cmap='gray')
+    plt.axis('off')
+plt.tight_layout()
+plt.savefig('generated_digits.png', dpi=150)
+plt.show()
+print("Сгенерированные цифры сохранены в файл generated_digits.png")
+
+# ------------------------------------------------------------
+# 8. ДОПОЛНИТЕЛЬНО: ПОКАЗАТЬ ИСТОРИЮ ОБУЧЕНИЯ
+# ------------------------------------------------------------
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['loss'], label='Train loss')
+plt.plot(history.history['val_loss'], label='Val loss')
+plt.title('Потери')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(history.history['accuracy'], label='Train acc')
+plt.plot(history.history['val_accuracy'], label='Val acc')
+plt.title('Точность')
+plt.legend()
+plt.tight_layout()
+plt.savefig('training_history.png', dpi=150)
+plt.show()
+print("Графики обучения сохранены в training_history.png")
